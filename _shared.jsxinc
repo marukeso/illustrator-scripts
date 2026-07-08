@@ -1,0 +1,173 @@
+// _shared.jsxinc
+// export-img.jsx / export-asset.jsx の共通処理。
+// 選択オブジェクトを指定名にリネームし、同名レイヤーへ移動し、PNG と JPEG で書き出す。
+// ※ この .jsxinc は各 .jsx と同じフォルダに置くこと（#include で相対参照している）。
+
+// 連番を付ける順番に選択を並べ替える（上→下、同じ行なら左→右）。
+// Illustrator は Y 軸が上向きなので、画面上で上にあるほど top の値が大きい＝ top 降順。
+// 縦位置が _ROW_TOL(pt) 以内なら「同じ行」とみなして左→右に並べる。
+var _ROW_TOL = 10; // 行の判定幅(pt)。行がずれて分かれる/混ざるときはここを調整
+function _sortForNaming(sel) {
+    var entries = [];
+    for (var i = 0; i < sel.length; i++) {
+        var it = sel[i];
+        var top = null, left = null;
+        // visibleBounds = [左, 上, 右, 下]。座標を持たない選択（文字範囲など）は null のまま
+        try { var b = it.visibleBounds; left = b[0]; top = b[1]; } catch (e) {}
+        entries.push({ item: it, top: top, left: left });
+    }
+    entries.sort(function (a, b) {
+        if (a.top === null && b.top === null) return 0;
+        if (a.top === null) return 1;  // 座標が取れないものは最後へ
+        if (b.top === null) return -1;
+        if (Math.abs(a.top - b.top) > _ROW_TOL) return b.top - a.top; // 上（top大）が先
+        return a.left - b.left; // 同じ行内は左が先
+    });
+    var out = [];
+    for (var j = 0; j < entries.length; j++) out.push(entries[j].item);
+    return out;
+}
+
+// 2桁ゼロ埋め（1→"01", 10→"10", 100→"100"）
+function _pad2(n) {
+    return (n < 10) ? ("0" + n) : ("" + n);
+}
+
+// フォルダ内で衝突しないベース名を返す。-01 から始め、空いている番号まで進める。
+// 例: img-01, img-02 ... （png/jpg 両方の空きを確認するので、既存があれば次の番号へ）
+function _uniqueBase(folder, name) {
+    var n = 1;
+    var base = name + "-" + _pad2(n);
+    while (new File(folder.fsName + "/" + base + ".png").exists ||
+           new File(folder.fsName + "/" + base + ".jpg").exists) {
+        n++;
+        base = name + "-" + _pad2(n);
+    }
+    return base;
+}
+
+// 指定名のレイヤーを返す。無ければ作成する（名前は小文字で完全一致）。
+function _getOrCreateLayer(doc, name) {
+    var layer = null;
+    try { layer = doc.layers.getByName(name); } catch (e) { layer = null; }
+    if (!layer) {
+        layer = doc.layers.add();
+        layer.name = name;
+    }
+    return layer;
+}
+
+// 選択オブジェクトを newName にリネームし、同名レイヤーへ移動し、assets/ へ PNG+JPEG で書き出す
+function renameAndExport(newName) {
+    // ドキュメントが開かれているか
+    if (app.documents.length === 0) {
+        alert("ドキュメントが開かれていません。");
+        return;
+    }
+
+    var doc = app.activeDocument;
+    var sel = doc.selection;
+
+    // 選択チェック（selection はオブジェクトの配列。テキスト編集中は TextRange が入る）
+    if (!sel || sel.length === 0) {
+        alert("オブジェクトが選択されていません。");
+        return;
+    }
+
+    // 連番の順番を「上→下、同じ行は左→右」に並べ替える
+    sel = _sortForNaming(sel);
+
+    // 書き出し先: ドキュメント横の assets/ サブフォルダ
+    var baseFolder = null;
+    try { baseFolder = doc.path; } catch (e) {} // 未保存ドキュメントは path が無い
+    if (!baseFolder || !baseFolder.exists) {
+        // 保存場所が無いときだけ、書き出し先を選んでもらう
+        baseFolder = Folder.selectDialog("書き出し先フォルダを選んでください（ドキュメントが未保存のため）");
+        if (!baseFolder) return; // キャンセル
+    }
+    var outFolder = new Folder(baseFolder.fsName + "/assets");
+    if (!outFolder.exists) outFolder.create();
+
+    // 書き出しオプション（いずれもアートボード基準でクリップして書き出す）
+    // 拡大したい場合は horizontalScale / verticalScale を 200 などにする（100 = 72ppi 相当）。
+    var pngOpts = new ExportOptionsPNG24();
+    pngOpts.transparency     = true;  // 背景を透過
+    pngOpts.antiAliasing     = true;
+    pngOpts.artBoardClipping = true;
+
+    var jpgOpts = new ExportOptionsJPEG();
+    jpgOpts.antiAliasing     = true;
+    jpgOpts.artBoardClipping = true;
+    jpgOpts.qualitySetting   = 80;    // 0-100
+
+    var ab = doc.artboards;
+    var origIndex = ab.getActiveArtboardIndex();
+
+    // 移動先レイヤー（newName と同名。無ければ作成）。取得に失敗したら移動はスキップする。
+    var targetLayer = null;
+    try { targetLayer = _getOrCreateLayer(doc, newName); } catch (e) { targetLayer = null; }
+
+    var renamed = 0;
+    var exported = 0;
+    var moved = 0;
+    var errors = [];
+
+    for (var i = 0; i < sel.length; i++) {
+        var item = sel[i];
+
+        // 1) リネーム。name を持たない選択（文字範囲など）はここで弾き、書き出しもしない。
+        try {
+            item.name = newName;
+            renamed++;
+        } catch (e) {
+            continue;
+        }
+
+        // 2) 書き出しファイル名（同名衝突は連番）
+        var base = _uniqueBase(outFolder, newName);
+
+        // 3) オブジェクト範囲に一時アートボードを作り、そこをクリップして書き出す。
+        //    ※ アートボード基準のため、範囲内に重なる別オブジェクトも一緒に写り込む点に注意。
+        var added = false;
+        try {
+            ab.add(item.visibleBounds); // visibleBounds = [左, 上, 右, 下]
+            added = true;
+            ab.setActiveArtboardIndex(ab.length - 1);
+
+            doc.exportFile(new File(outFolder.fsName + "/" + base + ".png"), ExportType.PNG24, pngOpts);
+            doc.exportFile(new File(outFolder.fsName + "/" + base + ".jpg"), ExportType.JPEG, jpgOpts);
+            exported++;
+        } catch (e) {
+            errors.push(base + ": " + e);
+        }
+
+        // 後始末: 追加した一時アートボードを必ず消して、元のアートボードに戻す
+        if (added) {
+            try { ab.remove(ab.length - 1); } catch (e2) {}
+        }
+        try { ab.setActiveArtboardIndex(origIndex); } catch (e3) {}
+
+        // 4) 同名レイヤーへ移動（レイヤーがロック/非表示だと失敗するので try で保護）
+        if (targetLayer) {
+            try {
+                item.move(targetLayer, ElementPlacement.PLACEATEND);
+                moved++;
+            } catch (e4) {
+                errors.push(base + "（移動）: " + e4);
+            }
+        }
+    }
+
+    // リネーム対象がゼロなら、その旨だけ知らせる
+    if (renamed === 0) {
+        alert("名前を設定できる対象がありませんでした。\n（文字を編集中の状態などが選択されている可能性があります）");
+        return;
+    }
+
+    // 連続作業の邪魔にならないよう、失敗があったときだけ通知する
+    if (errors.length > 0) {
+        alert("リネーム " + renamed + " 個 / 書き出し " + exported + " 個 / 移動 " + moved + " 個。\n" +
+              "書き出し先: " + outFolder.fsName +
+              "\n\n[失敗 " + errors.length + " 件]\n" + errors.join("\n"));
+    }
+}
