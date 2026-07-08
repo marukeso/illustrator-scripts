@@ -57,6 +57,20 @@ function _topLevelItems(layer) {
     return out;
 }
 
+// オブジェクトの「本当の」可視範囲を返す。
+// クリップグループは visibleBounds がマスク外の中身まで含んで返ることがある
+// （Illustrator の既知の癖。これが書き出しの白線・余白の原因になる）ため、
+// マスク（clipping = true のパス）が見つかればその範囲を使う。
+function _trueVisibleBounds(item) {
+    if (item.typename === "GroupItem" && item.clipped) {
+        var kids = item.pageItems;
+        for (var i = 0; i < kids.length; i++) {
+            try { if (kids[i].clipping) return kids[i].visibleBounds; } catch (e) {}
+        }
+    }
+    return item.visibleBounds;
+}
+
 // 1オブジェクトが1フォルダに出すファイルの拡張子（png/jpg）
 var _SUFFIXES = [".png", ".jpg"];
 
@@ -166,9 +180,9 @@ function exportLayer(layerName) {
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 
     // 書き出しオプション（等倍=100% と 2倍=200%。書き出し直前に scale を切り替える）。
-    // artBoardClipping = false にすると、アートボードではなく「書類内アートワークの
-    // 可視範囲ちょうど」にトリミングして書き出される。一時ドキュメントにはオブジェクトを
-    // 1つだけ複製するので、これで余白なしのバウンディングボックス書き出しになる。
+    // artBoardClipping = false ＝アートボードではなく「書類内アートワークの可視範囲ちょうど」で
+    // トリミング（余白なし）。一時ドキュメントにはオブジェクトを1つだけ複製する。
+    // 白線対策は下のループの「ピクセル境界スナップ」で行う（図形を足さないので余白は出ない）。
     var pngOpts = new ExportOptionsPNG24();
     pngOpts.transparency     = true;  // 背景を透過
     pngOpts.antiAliasing     = true;
@@ -188,10 +202,33 @@ function exportLayer(layerName) {
 
         var tmp = null;
         try {
-            // オブジェクトだけを一時ドキュメントに複製する。アートボードは使わず、
-            // 書き出し時に「アートワークの可視範囲」へトリミングされる（余白なし）。
+            // オブジェクトだけを一時ドキュメントに複製する。
             tmp = app.documents.add(doc.documentColorSpace);
-            item.duplicate(tmp.layers[0], ElementPlacement.PLACEATEND);
+            var dup = item.duplicate(tmp.layers[0], ElementPlacement.PLACEATEND);
+
+            // 【白線対策：整数境界で事前ラスタライズ】
+            // クリップマスクやリンク配置画像は、visibleBounds と実際の描画範囲が微妙に
+            // ずれるため（実測で確認）、端に半透明の列＝JPEGの白い線・PNGの薄い縁が出る。
+            // そこで書き出す前に「可視範囲を整数pt(=px)へ内側スナップした矩形」で
+            // ラスタライズ（＝その矩形ちょうどでピクセル化・切り抜き）する。これで描画と
+            // 境界が完全に一致し、端は不透明ピクセルで揃う。整数で作られたデータは
+            // スナップで値が変わらない＝削られない。解像度は144ppi（2倍相当）なので、
+            // 2倍書き出しは1:1、等倍はダウンサンプルとなり画質は落ちない。
+            var vb = _trueVisibleBounds(dup);               // [左, 上, 右, 下]（Y上向き）
+            var L = Math.ceil (vb[0]);                      // 左：内側（右）へ
+            var T = Math.floor(vb[1]);                      // 上：内側（下）へ
+            var R = Math.floor(vb[2]);                      // 右：内側（左）へ
+            var B = Math.ceil (vb[3]);                      // 下：内側（上）へ
+            if (R - L >= 1 && T - B >= 1) {                 // 潰れる極小物はそのまま書き出す
+                try {
+                    var ro = new RasterizeOptions();
+                    ro.resolution         = 144;            // 2倍相当（2x書き出しで1:1）
+                    ro.antiAliasingMethod = AntiAliasingMethod.ARTOPTIMIZED;
+                    ro.transparency       = true;           // PNG用に背景は透過のまま
+                    ro.padding            = 0;
+                    tmp.rasterize(dup, [L, T, R, B], ro);
+                } catch (eRas) {}                           // 失敗時は従来のまま書き出す
+            }
 
             // 等倍(100%) → img/
             pngOpts.horizontalScale = 100; pngOpts.verticalScale = 100;
