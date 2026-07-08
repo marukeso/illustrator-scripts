@@ -161,22 +161,23 @@ function exportLayer(layerName) {
     var outFolder2x = new Folder(outFolder.fsName + "/2x");                // 2倍
     if (!outFolder2x.exists) outFolder2x.create();
 
-    // 書き出しオプション（いずれもアートボード基準でクリップして書き出す）。
-    // 各オブジェクトを 等倍(100%)→img/ と 2倍(200%)→img/2x/ の2サイズで書き出すため、
-    // 書き出し直前に horizontalScale / verticalScale を切り替える（100 = 72ppi 相当）。
-    // ファイル名は等倍・2倍で同じ（例 img-01.png）。フォルダで区別する。
+    // 書き出し中のダイアログ（新規作成・カラープロファイル等）を抑制する
+    var prevInteraction = app.userInteractionLevel;
+    app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+
+    // 書き出しオプション（等倍=100% と 2倍=200%。書き出し直前に scale を切り替える）。
+    // artBoardClipping = false にすると、アートボードではなく「書類内アートワークの
+    // 可視範囲ちょうど」にトリミングして書き出される。一時ドキュメントにはオブジェクトを
+    // 1つだけ複製するので、これで余白なしのバウンディングボックス書き出しになる。
     var pngOpts = new ExportOptionsPNG24();
     pngOpts.transparency     = true;  // 背景を透過
     pngOpts.antiAliasing     = true;
-    pngOpts.artBoardClipping = true;
+    pngOpts.artBoardClipping = false; // アートボードではなくアートワークの範囲でトリミング
 
     var jpgOpts = new ExportOptionsJPEG();
     jpgOpts.antiAliasing     = true;
-    jpgOpts.artBoardClipping = true;
+    jpgOpts.artBoardClipping = false;
     jpgOpts.qualitySetting   = 80;    // 0-100
-
-    var ab = doc.artboards;
-    var origIndex = ab.getActiveArtboardIndex();
 
     var exported = 0;
     var errors = [];
@@ -185,37 +186,37 @@ function exportLayer(layerName) {
         var item = items[i];
         var base = _uniqueBase([outFolder, outFolder2x], layerName);
 
-        // オブジェクト範囲に一時アートボードを作り、そこをクリップして書き出す。
-        // ※ アートボード基準のため、範囲内に重なる別オブジェクトも一緒に写り込む点に注意。
-        var added = false;
+        var tmp = null;
         try {
-            ab.add(item.visibleBounds); // visibleBounds = [左, 上, 右, 下]
-            added = true;
-            ab.setActiveArtboardIndex(ab.length - 1);
+            // オブジェクトだけを一時ドキュメントに複製する。アートボードは使わず、
+            // 書き出し時に「アートワークの可視範囲」へトリミングされる（余白なし）。
+            tmp = app.documents.add(doc.documentColorSpace);
+            item.duplicate(tmp.layers[0], ElementPlacement.PLACEATEND);
 
             // 等倍(100%) → img/
             pngOpts.horizontalScale = 100; pngOpts.verticalScale = 100;
             jpgOpts.horizontalScale = 100; jpgOpts.verticalScale = 100;
-            doc.exportFile(new File(outFolder.fsName + "/" + base + ".png"), ExportType.PNG24, pngOpts);
-            doc.exportFile(new File(outFolder.fsName + "/" + base + ".jpg"), ExportType.JPEG, jpgOpts);
+            tmp.exportFile(new File(outFolder.fsName + "/" + base + ".png"), ExportType.PNG24, pngOpts);
+            tmp.exportFile(new File(outFolder.fsName + "/" + base + ".jpg"), ExportType.JPEG, jpgOpts);
 
             // 2倍(200%) → img/2x/（ファイル名は等倍と同じ）
             pngOpts.horizontalScale = 200; pngOpts.verticalScale = 200;
             jpgOpts.horizontalScale = 200; jpgOpts.verticalScale = 200;
-            doc.exportFile(new File(outFolder2x.fsName + "/" + base + ".png"), ExportType.PNG24, pngOpts);
-            doc.exportFile(new File(outFolder2x.fsName + "/" + base + ".jpg"), ExportType.JPEG, jpgOpts);
+            tmp.exportFile(new File(outFolder2x.fsName + "/" + base + ".png"), ExportType.PNG24, pngOpts);
+            tmp.exportFile(new File(outFolder2x.fsName + "/" + base + ".jpg"), ExportType.JPEG, jpgOpts);
 
             exported++;
         } catch (e) {
             errors.push(base + ": " + e);
         }
 
-        // 後始末: 追加した一時アートボードを必ず消して、元のアートボードに戻す
-        if (added) {
-            try { ab.remove(ab.length - 1); } catch (e2) {}
-        }
-        try { ab.setActiveArtboardIndex(origIndex); } catch (e3) {}
+        // 一時ドキュメントは保存せずに閉じる
+        if (tmp) { try { tmp.close(SaveOptions.DONOTSAVECHANGES); } catch (eC) {} }
     }
+
+    // 後始末: 元のドキュメントをアクティブに戻し、ダイアログ設定を復元
+    try { app.activeDocument = doc; } catch (eDoc) {}
+    app.userInteractionLevel = prevInteraction;
 
     var msg = "「" + layerName + "」レイヤーから " + exported + " 個を書き出しました。\n" + outFolder.fsName;
     if (errors.length > 0) {
