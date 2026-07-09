@@ -8,8 +8,9 @@
 
 ## このリポジトリの中身
 - Adobe Illustrator を操作する ExtendScript（`.jsx`）置き場。
-- 実処理は `_shared.jsxinc` に集約し、各 `.jsx`（move-img / move-asset / export-img / export-asset）は薄いエントリ。
+- 実処理は `_shared.jsxinc` に集約し、各 `.jsx`（move-img / move-asset）は薄いエントリ。
 - `.jsx` と `_shared.jsxinc` は同じフォルダ前提（`#include` で相対参照）。
+- **廃止：** export-img / export-asset は削除済み。共通処理 `exportLayer()` は `_shared.jsxinc` に残す（`git restore` でエントリを復活可）。
 
 ## 動作確認（重要）
 - **推測で実装してユーザーに検証させない。** 会社PCで Illustrator が起動していれば、COM 経由で自分で実行・検証できる。
